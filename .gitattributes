@@ -1,0 +1,5 @@
+* text=auto
+
+# Scripts must keep Unix line endings, or the #! line breaks.
+*.sh text eol=lf
+*.py text eol=lf

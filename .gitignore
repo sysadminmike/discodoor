@@ -1,0 +1,5 @@
+# A machine's identity: never commit these.
+*.pem
+
+__pycache__/
+*.pyc
