@@ -510,6 +510,21 @@ lookup trick on a box where a full Syncthing install isn't wanted.
   a few lookups every hour is negligible; don't hammer them, and respect
   `Retry-After`.
 
+
+## Security & Operational Considerations for Production/Multi-User Deployments
+
+While `discodoor` provides simple experience for non-technical users (especially on Windows), administrators should be aware of two inherent issues.
+
+### 1. The Shared Public IP Risk (CGNAT / Public Wi-Fi)
+`discodoor` creates firewall rules based strictly on the public source IP reported by the discovery server. When a client connects from a shared network—such as a coffee shop, hotel, airport, or an ISP using Carrier-Grade NAT (CGNAT)—they share a single public gateway IP with hundreds of other users. 
+* **Impact:** Your firewall opens the configured port to *the entire public IP*, meaning anyone else on that same local Wi-Fi or cellular tower can theoretically route traffic to your opened port.
+* **Mitigation:** Never rely on the `discodoor` allowlist as your sole layer of defense. The underlying service (e.g., an HTTPS web server or SSH) must be fully hardened with robust authentication (MFA, strong passwords, or cryptographic keys) and transport encryption.
+
+### 2. Connection Lag & OS Power Management
+Because the allowlist relies on a decoupled "announce-then-lookup" loop driven by a server-side cron job, there is an inherent delay when a client changes locations. On Windows laptops, aggressive OS power management may delay the Syncthing daemon from waking up and announcing its new IP immediately upon lid-open.
+* **Impact:** A user opening their laptop at a new location may experience a "Site cannot be reached" or connection timeout error for a few minutes until the next announce/cron cycle completes.
+* **Mitigation:** For tighter sync loops, consider hosting a private Syncthing Discovery Server ([`stdiscosrv`](https://docs.syncthing.net/users/stdiscosrv.html)). Running your own discovery infrastructure allows you to safely increase the announce frequency and lower the server-side cron job interval to every 1–2 minutes without hammering public community resources.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
