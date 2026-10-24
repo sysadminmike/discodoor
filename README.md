@@ -492,38 +492,29 @@ need to be paired or share any folders.
 If Box A runs Syncthing anyway, use that. Use `discodoor-announce.py` when you want the
 lookup trick on a box where a full Syncthing install isn't wanted.
 
-## Things to know
+### Things to Know & Security Considerations
 
-- **It's the router's IP.** That's what Box B's firewall sees as the source,
-  so it's exactly what you want. If Box A is behind CGNAT, the IP is shared
-  with other customers of the same ISP, so they get through the allowlist
-  too.
-- **Lag.** After Box A's IP changes, Box B learns about it at the next
-  announce plus the next cron run. Allow up to about an hour in the worst case.
-- **It's an allowlist, not authentication.** The discovery operator could
-  map an ID to any IP.
-- **TLS.** The announce and lookup hosts use Let's Encrypt certs. If
-  verification fails, fix the CA bundle (`ca-certificates` on Ubuntu,
-  `ca_root_nss` on FreeBSD) rather than using `-k` long term.
-- **Be polite.** These are free servers run by the Syncthing Foundation,
-  with no written terms and no promises. One announce every ~45 minutes and
-  a few lookups every hour is negligible; don't hammer them, and respect
-  `Retry-After`.
+#### 1. Network Constraints: Routers, CGNAT, and Shared IPs
+The discovery server registers the public gateway IP it sees when a device announces itself. While this is exactly what Box B's firewall needs to let your device in, it introduces a shared trust model on public or multiplexed networks:
+* **Shared Networks:** If you connect from an airport, hotel, or office, your device shares a single public IP with everyone else on that local Wi-Fi. 
+* **Carrier-Grade NAT (CGNAT):** Many cellular networks and home ISPs use CGNAT, meaning your public IP is shared with thousands of other customers from the same provider.
+* **Security Rule:** Opening the firewall opens it to the public IP. **discodoor is an obfuscation and discovery tool, not authentication.** The underlying service (like SSH or HTTPS) must still be fully hardened with robust authentication layers (such as cryptographic keys or MFA).
 
+#### 2. Connection Lag & Power Management
+Because discodoor relies on an asynchronous "announce-then-lookup" architecture, changes to a client's network are not instantaneous:
+* **Propagation Delay:** When Box A moves to a new network, Box B will only find out after Box A sends an announcement *and* Box B runs its next cron job. This can cause a connection lag of up to an hour under standard public interval settings.
+* **OS Power Controls:** Laptops often throttle network daemons when the screen closes. Opening a laptop lid may require a few minutes for the operating system to wake the Syncthing daemon up, trigger an announcement, and allow the server's cron task to catch up.
+* **The Fix:** If you need tighter synchronization, you can run a private Syncthing Discovery Server (`stdiscosrv`). Running your own infrastructure lets you safely increase announcement frequency and drop the cron lookup interval down to 1–2 minutes without abusing free public community servers.
 
-## Security & Operational Considerations for Production/Multi-User Deployments
+---
 
-While `discodoor` provides simple experience for non-technical users (especially on Windows), administrators should be aware of two inherent issues.
+### Scaling for Large Systems & Automated Access
 
-### 1. The Shared Public IP Risk (CGNAT / Public Wi-Fi)
-`discodoor` creates firewall rules based strictly on the public source IP reported by the discovery server. When a client connects from a shared network—such as a coffee shop, hotel, airport, or an ISP using Carrier-Grade NAT (CGNAT)—they share a single public gateway IP with hundreds of other users. 
-* **Impact:** Your firewall opens the configured port to *the entire public IP*, meaning anyone else on that same local Wi-Fi or cellular tower can theoretically route traffic to your opened port.
-* **Mitigation:** Never rely on the `discodoor` allowlist as your sole layer of defense. The underlying service (e.g., an HTTPS web server or SSH) must be fully hardened with robust authentication (MFA, strong passwords, or cryptographic keys) and transport encryption.
+You could use this to serve unknown or anonymous users on larger platforms. Because `discodoor-allow.sh` simply accepts device IDs, you can build an automated, self-service provisioning portal on top of it to manage access while filtering out spam and junk.
 
-### 2. Connection Lag & OS Power Management
-Because the allowlist relies on a decoupled "announce-then-lookup" loop driven by a server-side cron job, there is an inherent delay when a client changes locations. On Windows laptops, aggressive OS power management may delay the Syncthing daemon from waking up and announcing its new IP immediately upon lid-open.
-* **Impact:** A user opening their laptop at a new location may experience a "Site cannot be reached" or connection timeout error for a few minutes until the next announce/cron cycle completes.
-* **Mitigation:** For tighter sync loops, consider hosting a private Syncthing Discovery Server ([`stdiscosrv`](https://docs.syncthing.net/users/stdiscosrv.html)). Running your own discovery infrastructure allows you to safely increase the announce frequency and lower the server-side cron job interval to every 1–2 minutes without hammering public community resources.
+#### Example Workflows:
+* **Web Portal Verification:** Build a simple web landing page where anonymous users input their email address or telephone number alongside their Syncthing Device ID. The portal triggers an email verification link or an SMS one-time passcode (OTP). Once validated, the web backend appends the approved Device ID to the script's tracking list.
+* **Email / Chat Bot Automation:** Set up an inbound mail parser or a Discord chat bot . Users send a structured message containing their ID. The system validates their identity or enforces a Captcha challenge before running the allowlist script.
 
 ## License
 
