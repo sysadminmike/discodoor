@@ -4,13 +4,19 @@
 # discovery servers and load their public IPs into a pf table or an
 # nftables set.
 #
-# Usage: discodoor-allow.sh [-b pf|nft] [-t table] [-u lookup-url] [-d] [-n] [-k] DEVICE-ID [DEVICE-ID ...]
+# Usage: discodoor-allow.sh [-b pf|nft] [-t table] [-u lookup-url] [-c cert -K key] [-f file] [-d] [-n] [-k] [DEVICE-ID ...]
 #
+#   -f FILE    read device IDs from FILE, one per line; anything after a #
+#              is a comment, and blank lines are skipped. Can be combined
+#              with IDs on the command line.
 #   -b BACKEND pf or nft (default: pf if pfctl is found, else nft)
 #   -t TABLE   pf:  table name (default: ssh_ok)
 #              nft: set as FAMILY:TABLE:SET, or just SET for inet:filter:SET
 #                   (default: inet:filter:ssh_ok)
 #   -u URL     lookup server (default: https://discovery-lookup.syncthing.net/v2/)
+#   -c CERT    TLS client certificate (PEM) to present to the lookup server, for a
+#              discodoor-server with --lookup-access listed/watchers (needs -K)
+#   -K KEY     private key for CERT (PEM)
 #   -d         debug: show URLs, responses and what would change
 #   -n         dry run: show what would change, don't touch the firewall
 #   -k         don't verify the lookup server's TLS certificate
@@ -34,6 +40,12 @@
 #
 # Run from root's crontab, e.g. every 5 minutes:
 #   */5 * * * * /usr/local/sbin/discodoor-allow.sh AAAAAAA-BBBBBBB-...
+#   */5 * * * * /usr/local/sbin/discodoor-allow.sh -f /usr/local/etc/discodoor/allowed-devices
+#
+# An -f file looks like:
+#   # laptop and the backup server
+#   AAAAAAA-BBBBBBB-CCCCCCC-DDDDDDD-EEEEEEE-FFFFFFF-GGGGGGG-HHHHHHH   # laptop
+#   IIIIIII-JJJJJJJ-KKKKKKK-LLLLLLL-MMMMMMM-NNNNNNN-OOOOOOO-PPPPPPP   # backup server
 #
 # Needs: pfctl or nft, and curl or FreeBSD's fetch(1). No jq needed.
 #
@@ -53,6 +65,9 @@ LOOKUP=https://discovery-lookup.syncthing.net/v2/
 DEBUG=0
 DRYRUN=0
 INSECURE=0
+CERT=
+KEY=
+IDFILE=
 TAG=discodoor
 
 usage() {
@@ -76,20 +91,45 @@ log() {
 get() {
 	if command -v curl >/dev/null 2>&1; then
 		if [ "$INSECURE" = 1 ]; then
-			curl -sf --max-time 20 -k "$1"
+			# shellcheck disable=SC2086 # CERT/KEY options deliberately split
+			curl -sf --max-time 20 -k ${CERT:+--cert "$CERT" --key "$KEY"} "$1"
 		else
-			curl -sf --max-time 20 "$1"
+			# shellcheck disable=SC2086 # CERT/KEY options deliberately split
+			curl -sf --max-time 20 ${CERT:+--cert "$CERT" --key "$KEY"} "$1"
 		fi
 	elif command -v fetch >/dev/null 2>&1; then
 		if [ "$INSECURE" = 1 ]; then
-			fetch -q -T 20 --no-verify-peer -o - "$1"
+			# shellcheck disable=SC2086 # CERT/KEY options deliberately split
+			fetch -q -T 20 --no-verify-peer ${CERT:+--cert="$CERT" --key="$KEY"} -o - "$1"
 		else
-			fetch -q -T 20 -o - "$1"
+			# shellcheck disable=SC2086 # CERT/KEY options deliberately split
+			fetch -q -T 20 ${CERT:+--cert="$CERT" --key="$KEY"} -o - "$1"
 		fi
 	else
 		log "need curl or fetch"
 		exit 2
 	fi
+}
+
+# Print the device IDs in a file, one per line. Anything after a # is a
+# comment; blank lines and comment-only lines are skipped. Carriage returns
+# are dropped, so a file edited on Windows still works.
+read_ids() {
+	file=$1
+	[ -r "$file" ] || { log "can't read $file"; exit 2; }
+	n=0
+	tr -d '\r' < "$file" | while read -r id rest || [ -n "$id$rest" ]; do
+		n=$((n + 1))
+		case "$id" in
+		*'#'*) id=${id%%#*}; rest= ;;
+		esac
+		rest=${rest%%#*}
+		[ -n "$id" ] || continue
+		case "$rest" in
+		*[![:space:]]*) log "$file line $n: ignoring text after the ID; put notes after a #" ;;
+		esac
+		echo "$id"
+	done
 }
 
 # Pull addresses out of the JSON, drop relays, strip scheme/port/brackets,
@@ -156,6 +196,7 @@ nft_init() {
 	esac
 	NFT="$NFT_FAMILY $NFT_TABLE $NFT_SET"
 	TARGET="nft set $NFT"
+	# shellcheck disable=SC2086 # NFT is "family table set": three words
 	if ! nft list set $NFT >/dev/null 2>&1; then
 		log "can't read $TARGET (does it exist? are you root?)"
 		exit 2
@@ -173,6 +214,7 @@ nft_filter() {
 
 # nft prints "elements = { a, b,\n c }"; take the first word of each element.
 nft_show() {
+	# shellcheck disable=SC2086 # NFT is "family table set": three words
 	nft list set $NFT 2>/dev/null |
 	sed -n '/elements = {/,/}/p' |
 	sed 's/.*{//; s/}.*//' |
@@ -185,6 +227,7 @@ nft_show() {
 nft_add() {
 	list=$(echo "$*" | sed 's/ /, /g')
 	[ "$DRYRUN" = 1 ] && { echo "dry run: nft add element $NFT { $list }"; return; }
+	# shellcheck disable=SC2086 # NFT is "family table set": three words
 	nft add element $NFT "{ $list }"
 }
 
@@ -199,11 +242,14 @@ add element $NFT { $list }"
 
 # ---- main ------------------------------------------------------------------
 
-while getopts "b:t:u:dnkh" opt; do
+while getopts "b:t:u:c:K:f:dnkh" opt; do
 	case "$opt" in
 	b) BACKEND=$OPTARG ;;
 	t) TABLE=$OPTARG ;;
 	u) LOOKUP=$OPTARG ;;
+	c) CERT=$OPTARG ;;
+	K) KEY=$OPTARG ;;
+	f) IDFILE=$OPTARG ;;
 	d) DEBUG=1 ;;
 	n) DRYRUN=1 ;;
 	k) INSECURE=1 ;;
@@ -212,7 +258,20 @@ while getopts "b:t:u:dnkh" opt; do
 	esac
 done
 shift $((OPTIND - 1))
+if [ -n "$IDFILE" ]; then
+	ids=$(read_ids "$IDFILE") || exit 2
+	# shellcheck disable=SC2086 # one ID per line; splitting intended
+	set -- "$@" $ids
+	if [ $# -eq 0 ]; then
+		log "no device IDs in $IDFILE; nothing changed"
+		exit 1
+	fi
+fi
 [ $# -ge 1 ] || usage 1
+if [ -n "$CERT$KEY" ] && { [ -z "$CERT" ] || [ -z "$KEY" ]; }; then
+	echo "$TAG: -c and -K go together" >&2
+	exit 1
+fi
 
 if [ -z "$BACKEND" ]; then
 	if command -v pfctl >/dev/null 2>&1; then
@@ -248,10 +307,12 @@ for id in "$@"; do
 		failed=1
 		continue
 	fi
+	# shellcheck disable=SC2116,SC2086 # echo flattens a multi-line list for the log
 	dbg "$id -> $(echo $ips)"
 	found="$found $ips"
 done
 
+# shellcheck disable=SC2086 # found holds whitespace-separated IPs; splitting intended
 found=$(printf '%s\n' $found | sort -u)
 if [ -z "$found" ]; then
 	log "nothing found; $TARGET left unchanged"
@@ -259,10 +320,13 @@ if [ -z "$found" ]; then
 fi
 
 current=$("${BACKEND}_show")
+# shellcheck disable=SC2116,SC2086 # echo flattens a multi-line list for the log
 dbg "$TARGET now: $(echo $current)"
+# shellcheck disable=SC2116,SC2086 # echo flattens a multi-line list for the log
 dbg "wanted: $(echo $found)"
 
 if [ "$failed" = 1 ]; then
+	# shellcheck disable=SC2086 # found holds whitespace-separated IPs; splitting intended
 	new=$(printf '%s\n' $found | while read -r ip; do
 		printf '%s\n' "$current" | grep -qxF "$ip" || echo "$ip"
 	done)
@@ -270,13 +334,17 @@ if [ "$failed" = 1 ]; then
 		dbg "some lookups failed; nothing new to add"
 		exit 0
 	fi
+	# shellcheck disable=SC2116,SC2086 # echo flattens a multi-line list for the log
 	log "some lookups failed; adding only: $(echo $new)"
+	# shellcheck disable=SC2086 # the IP list is passed as separate arguments
 	"${BACKEND}_add" $new
 else
 	if [ "$current" = "$found" ]; then
 		dbg "no change"
 		exit 0
 	fi
+	# shellcheck disable=SC2116,SC2086 # echo flattens a multi-line list for the log
 	log "$TARGET: [$(echo $current)] -> [$(echo $found)]"
+	# shellcheck disable=SC2086 # the IP list is passed as separate arguments
 	"${BACKEND}_replace" $found
 fi

@@ -423,6 +423,9 @@ otherwise nft. `-b` overrides that.
 | `-b pf\|nft` | firewall to update (default: pf if `pfctl` is found, else nft) |
 | `-t TABLE` | pf: table name (default `ssh_ok`); nft: `FAMILY:TABLE:SET`, or just `SET` for `inet:filter:SET` (default `inet:filter:ssh_ok`) |
 | `-u URL` | lookup server (default `https://discovery-lookup.syncthing.net/v2/`) |
+| `-c CERT` | TLS client certificate (PEM) to present to the lookup server; needed for a discodoor-server with `--lookup-access listed` or `watchers` (use with `-K`) |
+| `-K KEY` | private key for `CERT` (PEM) |
+| `-f FILE` | read device IDs from `FILE`, one per line (see below); can be combined with IDs on the command line |
 | `-d` | debug output |
 | `-n` | dry run: show what would change, don't touch the firewall |
 | `-k` | don't verify the lookup server's TLS certificate |
@@ -433,6 +436,24 @@ then holds every IP found:
 ```sh
 discodoor-allow.sh A-DEVICE-ID C-DEVICE-ID D-DEVICE-ID
 ```
+
+Once there are more than a couple, keep them in a file and pass it with
+`-f`. Put one ID per line. Anything after a `#` is a comment, so you can
+note whose each ID is. Blank lines and lines starting with `#` are skipped:
+
+```
+# /usr/local/etc/discodoor/allowed-devices
+AAAAAAA-BBBBBBB-CCCCCCC-DDDDDDD-EEEEEEE-FFFFFFF-GGGGGGG-HHHHHHH   # laptop
+IIIIIII-JJJJJJJ-KKKKKKK-LLLLLLL-MMMMMMM-NNNNNNN-OOOOOOO-PPPPPPP   # backup server
+```
+
+```
+*/30 * * * * /usr/local/sbin/discodoor-allow.sh -f /usr/local/etc/discodoor/allowed-devices
+```
+
+Adding or removing a machine is then just an edit to the file; the next
+cron run picks it up. If the file has no IDs in it, the table is left
+alone and the script exits 1.
 
 How it updates the table or set:
 
@@ -502,7 +523,7 @@ The discovery server registers the public gateway IP it sees when a device annou
 
 #### 2. Connection Lag & Power Management
 Because discodoor relies on an asynchronous "announce-then-lookup" architecture, changes to a client's network are not instantaneous:
-* **Propagation Delay:** When Box A moves to a new network, Box B will only find out after Box A sends an announcement *and* Box B runs its next cron job. This can cause a connection lag of up to an hour under standard public interval settings.
+* **Propagation Delay:** When Box A moves to a new network, Box B will only find out after Box A sends an announcement *and* Box B runs its next cron job. This can cause a connection lag of a little over an hour, since Syncthing's public servers ask for a re-announce every 40–70 minutes.
 * **OS Power Controls:** Laptops often throttle network daemons when the screen closes. Opening a laptop lid may require a few minutes for the operating system to wake the Syncthing daemon up, trigger an announcement, and allow the server's cron task to catch up.
 * **The Fix:** If you need tighter synchronization, you can run a private Syncthing Discovery Server (`stdiscosrv`). Running your own infrastructure lets you safely increase announcement frequency and drop the cron lookup interval down to 1–2 minutes without abusing free public community servers.
 
